@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#02060a">
+<title>Star Wars Schach – Anmelden</title>
+<style>
+  html,body{margin:0;height:100%;background:#02060a;color:#cfefff;font-family:-apple-system,system-ui,sans-serif}
+  body{display:flex;align-items:center;justify-content:center;overflow:hidden;
+    background:radial-gradient(ellipse at 30% 75%,#2a1450 0,transparent 55%),radial-gradient(ellipse at 75% 30%,#0f2c5a 0,transparent 50%),#02060a}
+  .stars{position:fixed;inset:0;pointer-events:none;background-image:
+    radial-gradient(1px 1px at 12% 22%,#fff,transparent),radial-gradient(1px 1px at 68% 14%,#cfe0ff,transparent),
+    radial-gradient(1.5px 1.5px at 82% 64%,#fff,transparent),radial-gradient(1px 1px at 34% 82%,#ffe9c8,transparent),
+    radial-gradient(1px 1px at 52% 46%,#fff,transparent),radial-gradient(1.5px 1.5px at 8% 70%,#a9c4ff,transparent),
+    radial-gradient(1px 1px at 92% 88%,#fff,transparent),radial-gradient(1px 1px at 44% 8%,#fff,transparent);
+    background-size:420px 420px;opacity:.8}
+  main{position:relative;width:min(340px,88vw);display:grid;gap:18px;text-align:center}
+  .sw{white-space:nowrap;font-family:Futura-CondensedExtraBold,"Futura",Impact,sans-serif;font-size:min(13vw,60px);letter-spacing:.06em;line-height:1;
+    color:transparent;-webkit-text-stroke:2px #ffe81f;filter:drop-shadow(0 0 10px #ffe81f66)}
+  .ch{font-weight:200;letter-spacing:.5em;margin-left:.5em;color:#9fefff;text-shadow:0 0 12px #5fd4ff;font-size:min(7vw,28px)}
+  form{background:#0b1d2bf2;border:1px solid #1e6f8f;border-radius:12px;padding:18px;display:grid;gap:12px;box-shadow:0 0 30px #1e6f8f55;text-align:left}
+  label{font-size:12px;opacity:.75;display:grid;gap:6px}
+  input{font:inherit;font-size:16px;padding:10px 12px;border-radius:8px;border:1px solid #1e6f8f;background:#06121c;color:#e6f7ff;outline:none}
+  input:focus{border-color:#5fd4ff;box-shadow:0 0 0 2px #5fd4ff33}
+  button{font:inherit;font-size:17px;padding:11px;border-radius:8px;border:0;background:#1e6f8f;color:#fff;cursor:pointer}
+  button:disabled{opacity:.6;cursor:default}
+  .msg{min-height:18px;font-size:13px;color:#ff8a7a;text-align:center}
+  .hint{font-size:12px;opacity:.55}
+</style>
+</head>
+<body>
+<div class="stars"></div>
+<main>
+  <div><div class="sw">STAR WARS</div><div class="ch">SCHACH</div></div>
+  <form id="f" autocomplete="on">
+    <label>Name<input id="name" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+    <label>Passwort<input id="pw" name="password" type="password" autocomplete="current-password" required></label>
+    <button id="go">Anmelden</button>
+    <div class="msg" id="msg"></div>
+  </form>
+  <div class="hint">Privates Spiel · nur mit Zugang</div>
+</main>
+<script type="module">
+// Zugang: zugang.json enthält je Konto den Spiel-Schlüssel, verschlüsselt mit einem Schlüssel aus dem Passwort
+// (PBKDF2-SHA-256, AES-GCM). spiel.bin ist das mit diesem Spiel-Schlüssel verschlüsselte Spiel. Nach dem Login
+// werden die Dateien in den Cache gelegt und vom Service Worker ausgeliefert. Der Spiel-Schlüssel bleibt im
+// localStorage („angemeldet bleiben“, 60 Tage), damit neue Fassungen ohne erneute Anmeldung laden.
+const CACHE = 'sws-spiel', KEY = 'sws.login', DAYS = 60;
+const $ = (id) => document.getElementById(id), enc = new TextEncoder();
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+const toB64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const hex = (buf) => [...new Uint8Array(buf)].map((x) => x.toString(16).padStart(2, '0')).join('');
+const say = (t) => { $('msg').textContent = t; };
+
+async function meta() { const r = await fetch('zugang.json', { cache: 'no-store' }); if (!r.ok) throw new Error('zugang.json fehlt'); return r.json(); }
+
+async function unlock(acc, name, pw) {
+  const h = hex(await crypto.subtle.digest('SHA-256', enc.encode('sws:' + name.trim().toLowerCase())));
+  const u = acc.users[h];
+  const base = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
+  // auch bei unbekanntem Namen gleich lange rechnen, damit man Namen nicht am Tempo erkennt
+  const kek = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: u ? b64(u.salt) : enc.encode('x'), iterations: acc.iter, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  if (!u) return null;
+  try { return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(u.iv) }, kek, b64(u.key)); } catch { return null; }
+}
+
+async function install(acc, rawKey) {
+  const K = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
+  const r = await fetch('spiel.bin', { cache: 'no-store' });
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(acc.data.iv) }, K, await r.arrayBuffer());
+  const n = new DataView(plain).getUint32(0);
+  const files = JSON.parse(new TextDecoder().decode(new Uint8Array(plain, 4, n)));
+  await caches.delete(CACHE);
+  const cache = await caches.open(CACHE);
+  for (const f of files) await cache.put(new URL(f.p, location.href).href,
+    new Response(new Uint8Array(plain, 4 + n + f.o, f.n), { headers: { 'Content-Type': f.t } }));
+  return files.length;
+}
+
+async function startGame() {
+  const reg = await navigator.serviceWorker.register('sw.js');
+  await navigator.serviceWorker.ready;
+  if (!navigator.serviceWorker.controller) await new Promise((res) => {
+    navigator.serviceWorker.addEventListener('controllerchange', res, { once: true }); setTimeout(res, 1500); });
+  reg.update?.();
+  location.replace('spielbrett.html' + location.search);
+}
+
+async function auto() {                         // schon angemeldet: ggf. neue Fassung laden, dann ins Spiel
+  let s; try { s = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch {}
+  if (!s || !s.k || s.until < Date.now()) { localStorage.removeItem(KEY); return false; }
+  try {
+    const acc = await meta();
+    if (s.build !== acc.build || !(await (await caches.open(CACHE)).match(new URL('spielbrett.html', location.href).href))) {
+      say('Neue Fassung wird geladen …'); await install(acc, b64(s.k)); s.build = acc.build; localStorage.setItem(KEY, JSON.stringify(s));
+    }
+    await startGame(); return true;
+  } catch (e) { console.error(e); localStorage.removeItem(KEY); say(''); return false; }
+}
+
+if (!('serviceWorker' in navigator) || !crypto?.subtle) say('Dieser Browser kann das Spiel nicht öffnen (nur über https).');
+else if (!(await auto())) $('name').focus();
+
+$('f').onsubmit = async (ev) => {
+  ev.preventDefault();
+  $('go').disabled = true; say('Prüfe Zugang …');
+  try {
+    const acc = await meta(), raw = await unlock(acc, $('name').value, $('pw').value);
+    if (!raw) { say('Name oder Passwort falsch'); $('go').disabled = false; $('pw').select(); return; }
+    say('Spiel wird entschlüsselt …');
+    await install(acc, raw);
+    localStorage.setItem(KEY, JSON.stringify({ k: toB64(raw), build: acc.build, until: Date.now() + DAYS * 864e5 }));
+    await startGame();
+  } catch (e) { console.error(e); say('Fehler: ' + e.message); $('go').disabled = false; }
+};
+</script>
+</body>
+</html>
