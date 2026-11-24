@@ -45,61 +45,21 @@
   <div class="hint">Privates Spiel · nur mit Zugang</div>
 </main>
 <script type="module">
-// Zugang: zugang.json enthält je Konto den Spiel-Schlüssel, verschlüsselt mit einem Schlüssel aus dem Passwort
-// (PBKDF2-SHA-256, AES-GCM). spiel.bin ist das mit diesem Spiel-Schlüssel verschlüsselte Spiel. Nach dem Login
-// werden die Dateien in den Cache gelegt und vom Service Worker ausgeliefert. Der Spiel-Schlüssel bleibt im
-// localStorage („angemeldet bleiben“, 60 Tage), damit neue Fassungen ohne erneute Anmeldung laden.
-const CACHE = 'sws-spiel', KEY = 'sws.login', DAYS = 60;
-const $ = (id) => document.getElementById(id), enc = new TextEncoder();
-const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-const toB64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
-const hex = (buf) => [...new Uint8Array(buf)].map((x) => x.toString(16).padStart(2, '0')).join('');
-const say = (t) => { $('msg').textContent = t; };
+// Anmeldung: wird nur gezeigt, solange das entschlüsselte Spiel nicht im Cache liegt (dann liefert der
+// Service Worker unter derselben Adresse das Spiel). Ablauf und Format in zugang.js.
+import { meta, unlock, install, loadLogin, worker, b64, toB64, KEY, DAYS } from './zugang.js';
+const $ = (id) => document.getElementById(id), say = (t) => { $('msg').textContent = t; };
+const enter = () => { location.replace(new URL('./', location.href).href + location.search); };
 
-async function meta() { const r = await fetch('zugang.json', { cache: 'no-store' }); if (!r.ok) throw new Error('zugang.json fehlt'); return r.json(); }
-
-async function unlock(acc, name, pw) {
-  const h = hex(await crypto.subtle.digest('SHA-256', enc.encode('sws:' + name.trim().toLowerCase())));
-  const u = acc.users[h];
-  const base = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
-  // auch bei unbekanntem Namen gleich lange rechnen, damit man Namen nicht am Tempo erkennt
-  const kek = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: u ? b64(u.salt) : enc.encode('x'), iterations: acc.iter, hash: 'SHA-256' },
-    base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
-  if (!u) return null;
-  try { return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(u.iv) }, kek, b64(u.key)); } catch { return null; }
-}
-
-async function install(acc, rawKey) {
-  const K = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
-  const r = await fetch('spiel.bin', { cache: 'no-store' });
-  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(acc.data.iv) }, K, await r.arrayBuffer());
-  const n = new DataView(plain).getUint32(0);
-  const files = JSON.parse(new TextDecoder().decode(new Uint8Array(plain, 4, n)));
-  await caches.delete(CACHE);
-  const cache = await caches.open(CACHE);
-  for (const f of files) await cache.put(new URL(f.p, location.href).href,
-    new Response(new Uint8Array(plain, 4 + n + f.o, f.n), { headers: { 'Content-Type': f.t } }));
-  return files.length;
-}
-
-async function startGame() {
-  const reg = await navigator.serviceWorker.register('sw.js');
-  await navigator.serviceWorker.ready;
-  if (!navigator.serviceWorker.controller) await new Promise((res) => {
-    navigator.serviceWorker.addEventListener('controllerchange', res, { once: true }); setTimeout(res, 1500); });
-  reg.update?.();
-  location.replace('spielbrett.html' + location.search);
-}
-
-async function auto() {                         // schon angemeldet: ggf. neue Fassung laden, dann ins Spiel
-  let s; try { s = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch {}
-  if (!s || !s.k || s.until < Date.now()) { localStorage.removeItem(KEY); return false; }
+async function auto() {                         // schon angemeldet, aber Spiel fehlt im Cache: neu einspielen
+  const s = loadLogin();
+  if (!s) { localStorage.removeItem(KEY); return false; }
+  if (sessionStorage.getItem('sws.auto')) { sessionStorage.removeItem('sws.auto'); return false; }   // keine Schleife
   try {
+    say('Spiel wird geladen …');
     const acc = await meta();
-    if (s.build !== acc.build || !(await (await caches.open(CACHE)).match(new URL('spielbrett.html', location.href).href))) {
-      say('Neue Fassung wird geladen …'); await install(acc, b64(s.k)); s.build = acc.build; localStorage.setItem(KEY, JSON.stringify(s));
-    }
-    await startGame(); return true;
+    await install(acc, b64(s.k)); s.build = acc.build; localStorage.setItem(KEY, JSON.stringify(s));
+    await worker(); sessionStorage.setItem('sws.auto', '1'); enter(); return true;
   } catch (e) { console.error(e); localStorage.removeItem(KEY); say(''); return false; }
 }
 
@@ -115,7 +75,8 @@ $('f').onsubmit = async (ev) => {
     say('Spiel wird entschlüsselt …');
     await install(acc, raw);
     localStorage.setItem(KEY, JSON.stringify({ k: toB64(raw), build: acc.build, until: Date.now() + DAYS * 864e5 }));
-    await startGame();
+    await worker();
+    enter();
   } catch (e) { console.error(e); say('Fehler: ' + e.message); $('go').disabled = false; }
 };
 </script>
